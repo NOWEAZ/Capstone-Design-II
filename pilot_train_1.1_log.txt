@@ -1,0 +1,116 @@
+Device: cuda
+  초기 가중치 파일 이미 존재 (skip): outputs/init_weights/init_seed41.pt
+
+============================================================
+Pilot Step 1: 해상도 비교 (28x28 vs 64x64, SGD, 10 Epoch)
+============================================================
+  초기 가중치 로드: outputs/init_weights/init_seed41.pt
+[SGD res=28] Ep   1/10  loss=1.6171  acc=0.5783  F1=0.4069  ECE=0.1509  (14.9s)
+[SGD res=28] Ep   2/10  loss=1.0367  acc=0.6425  F1=0.5077  ECE=0.0425  (12.6s)
+[SGD res=28] Ep   3/10  loss=0.7180  acc=0.7342  F1=0.6175  ECE=0.0505  (12.7s)
+[SGD res=28] Ep   4/10  loss=0.5568  acc=0.7856  F1=0.7503  ECE=0.0493  (12.9s)
+[SGD res=28] Ep   5/10  loss=0.4921  acc=0.7500  F1=0.6810  ECE=0.0411  (12.9s)
+[SGD res=28] Ep   6/10  loss=0.4443  acc=0.8633  F1=0.8341  ECE=0.0493  (13.0s)
+[SGD res=28] Ep   7/10  loss=0.3780  acc=0.8563  F1=0.8208  ECE=0.0255  (13.0s)
+[SGD res=28] Ep   8/10  loss=0.3451  acc=0.8803  F1=0.8570  ECE=0.0333  (12.8s)
+[SGD res=28] Ep   9/10  loss=0.3161  acc=0.8581  F1=0.8206  ECE=0.0125  (12.7s)
+[SGD res=28] Ep  10/10  loss=0.3111  acc=0.8919  F1=0.8724  ECE=0.0176  (12.9s)
+  → 해상도 28x28  Final Macro-F1=0.8724  Best=0.8724
+  초기 가중치 로드: outputs/init_weights/init_seed41.pt
+[SGD res=64] Ep   1/10  loss=1.6133  acc=0.5613  F1=0.3745  ECE=0.1198  (48.5s)
+[SGD res=64] Ep   2/10  loss=1.0403  acc=0.6799  F1=0.5200  ECE=0.0703  (48.5s)
+[SGD res=64] Ep   3/10  loss=0.7094  acc=0.7669  F1=0.6857  ECE=0.0417  (48.5s)
+[SGD res=64] Ep   4/10  loss=0.5614  acc=0.7897  F1=0.7314  ECE=0.0386  (48.6s)
+[SGD res=64] Ep   5/10  loss=0.5041  acc=0.8300  F1=0.7982  ECE=0.0527  (48.6s)
+[SGD res=64] Ep   6/10  loss=0.4392  acc=0.8546  F1=0.8244  ECE=0.0487  (48.8s)
+[SGD res=64] Ep   7/10  loss=0.3949  acc=0.8592  F1=0.8364  ECE=0.0273  (48.6s)
+[SGD res=64] Ep   8/10  loss=0.3605  acc=0.8732  F1=0.8462  ECE=0.0221  (48.6s)
+[SGD res=64] Ep   9/10  loss=0.3449  acc=0.8750  F1=0.8481  ECE=0.0149  (48.6s)
+[SGD res=64] Ep  10/10  loss=0.3356  acc=0.8949  F1=0.8788  ECE=0.0286  (48.7s)
+  → 해상도 64x64  Final Macro-F1=0.8788  Best=0.8788
+
+  ✓ 해상도 비교 승리: 64x64 (F1=0.8788)
+
+============================================================
+Pilot Step 2: Optimizer 비교 (SGD vs Adam, res=64, 10 Epoch)
+============================================================
+  초기 가중치 로드: outputs/init_weights/init_seed41.pt
+[SGD res=64] Ep   1/10  loss=1.6133  acc=0.5613  F1=0.3745  ECE=0.1198  (48.5s)
+[SGD res=64] Ep   2/10  loss=1.0403  acc=0.6799  F1=0.5200  ECE=0.0703  (48.5s)
+[SGD res=64] Ep   3/10  loss=0.7094  acc=0.7669  F1=0.6857  ECE=0.0417  (48.6s)
+[SGD res=64] Ep   4/10  loss=0.5614  acc=0.7897  F1=0.7314  ECE=0.0386  (48.5s)
+[SGD res=64] Ep   5/10  loss=0.5041  acc=0.8300  F1=0.7982  ECE=0.0527  (48.5s)
+[SGD res=64] Ep   6/10  loss=0.4392  acc=0.8546  F1=0.8244  ECE=0.0487  (48.5s)
+[SGD res=64] Ep   7/10  loss=0.3949  acc=0.8592  F1=0.8364  ECE=0.0273  (48.6s)
+[SGD res=64] Ep   8/10  loss=0.3605  acc=0.8732  F1=0.8462  ECE=0.0221  (48.6s)
+[SGD res=64] Ep   9/10  loss=0.3449  acc=0.8750  F1=0.8481  ECE=0.0149  (48.7s)
+[SGD res=64] Ep  10/10  loss=0.3356  acc=0.8949  F1=0.8788  ECE=0.0286  (48.5s)
+  → SGD  Final Macro-F1=0.8788
+  초기 가중치 로드: outputs/init_weights/init_seed41.pt
+[ADAM res=64] Ep   1/10  loss=1.9892  acc=0.4679  F1=0.2787  ECE=0.0454  (48.5s)
+[ADAM res=64] Ep   2/10  loss=1.2926  acc=0.4930  F1=0.3364  ECE=0.0833  (48.5s)
+[ADAM res=64] Ep   3/10  loss=1.0467  acc=0.6822  F1=0.6135  ECE=0.0823  (48.5s)
+[ADAM res=64] Ep   4/10  loss=0.7776  acc=0.7512  F1=0.6994  ECE=0.0202  (48.6s)
+[ADAM res=64] Ep   5/10  loss=0.5509  acc=0.8072  F1=0.7672  ECE=0.0353  (48.5s)
+[ADAM res=64] Ep   6/10  loss=0.5075  acc=0.8534  F1=0.8287  ECE=0.0304  (48.5s)
+[ADAM res=64] Ep   7/10  loss=0.4409  acc=0.8569  F1=0.8281  ECE=0.0149  (48.6s)
+[ADAM res=64] Ep   8/10  loss=0.4034  acc=0.8680  F1=0.8495  ECE=0.0260  (48.5s)
+[ADAM res=64] Ep   9/10  loss=0.3762  acc=0.8768  F1=0.8580  ECE=0.0341  (48.7s)
+[ADAM res=64] Ep  10/10  loss=0.3709  acc=0.8435  F1=0.8022  ECE=0.0241  (48.6s)
+  → ADAM  Final Macro-F1=0.8022
+
+  ✓ Optimizer 비교 승리: SGD (F1=0.8788)
+
+============================================================
+Pilot Step 3: 라운드 비교 (res=64, SGD, 40 Epoch)
+============================================================
+  초기 가중치 로드: outputs/init_weights/init_seed41.pt
+[SGD res=64 40ep] Ep   1/40  loss=1.6133  acc=0.5613  F1=0.3745  ECE=0.1198  (48.3s)
+[SGD res=64 40ep] Ep   2/40  loss=1.0403  acc=0.6799  F1=0.5200  ECE=0.0703  (48.5s)
+[SGD res=64 40ep] Ep   3/40  loss=0.7094  acc=0.7669  F1=0.6857  ECE=0.0417  (48.4s)
+[SGD res=64 40ep] Ep   4/40  loss=0.5614  acc=0.7897  F1=0.7314  ECE=0.0386  (48.4s)
+[SGD res=64 40ep] Ep   5/40  loss=0.5041  acc=0.8300  F1=0.7982  ECE=0.0527  (48.4s)
+[SGD res=64 40ep] Ep   6/40  loss=0.4392  acc=0.8546  F1=0.8244  ECE=0.0487  (48.6s)
+[SGD res=64 40ep] Ep   7/40  loss=0.3949  acc=0.8592  F1=0.8364  ECE=0.0273  (48.6s)
+[SGD res=64 40ep] Ep   8/40  loss=0.3605  acc=0.8732  F1=0.8462  ECE=0.0221  (48.6s)
+[SGD res=64 40ep] Ep   9/40  loss=0.3449  acc=0.8750  F1=0.8481  ECE=0.0149  (48.6s)
+[SGD res=64 40ep] Ep  10/40  loss=0.3356  acc=0.8949  F1=0.8788  ECE=0.0286  (48.7s)
+[SGD res=64 40ep] Ep  11/40  loss=0.3088  acc=0.8692  F1=0.8365  ECE=0.0243  (48.6s)
+[SGD res=64 40ep] Ep  12/40  loss=0.2754  acc=0.9217  F1=0.9112  ECE=0.0321  (48.7s)
+[SGD res=64 40ep] Ep  13/40  loss=0.2652  acc=0.9136  F1=0.8986  ECE=0.0246  (48.5s)
+[SGD res=64 40ep] Ep  14/40  loss=0.2613  acc=0.9124  F1=0.9002  ECE=0.0177  (48.5s)
+[SGD res=64 40ep] Ep  15/40  loss=0.2383  acc=0.9252  F1=0.9111  ECE=0.0279  (48.6s)
+[SGD res=64 40ep] Ep  16/40  loss=0.2297  acc=0.9159  F1=0.9045  ECE=0.0202  (48.5s)
+[SGD res=64 40ep] Ep  17/40  loss=0.2251  acc=0.9363  F1=0.9256  ECE=0.0306  (48.7s)
+[SGD res=64 40ep] Ep  18/40  loss=0.2047  acc=0.9311  F1=0.9204  ECE=0.0134  (48.6s)
+[SGD res=64 40ep] Ep  19/40  loss=0.2356  acc=0.8657  F1=0.8484  ECE=0.0281  (48.7s)
+[SGD res=64 40ep] Ep  20/40  loss=0.2045  acc=0.9194  F1=0.9082  ECE=0.0195  (48.5s)
+[SGD res=64 40ep] Ep  21/40  loss=0.2054  acc=0.9007  F1=0.8860  ECE=0.0211  (48.6s)
+[SGD res=64 40ep] Ep  22/40  loss=0.1816  acc=0.9311  F1=0.9245  ECE=0.0115  (48.6s)
+[SGD res=64 40ep] Ep  23/40  loss=0.1818  acc=0.9282  F1=0.9200  ECE=0.0203  (48.7s)
+[SGD res=64 40ep] Ep  24/40  loss=0.1816  acc=0.9433  F1=0.9347  ECE=0.0179  (48.6s)
+[SGD res=64 40ep] Ep  25/40  loss=0.1775  acc=0.9270  F1=0.9192  ECE=0.0190  (48.6s)
+[SGD res=64 40ep] Ep  26/40  loss=0.1804  acc=0.9165  F1=0.8979  ECE=0.0191  (48.7s)
+[SGD res=64 40ep] Ep  27/40  loss=0.1569  acc=0.9486  F1=0.9433  ECE=0.0174  (48.6s)
+[SGD res=64 40ep] Ep  28/40  loss=0.1492  acc=0.9393  F1=0.9315  ECE=0.0112  (48.7s)
+[SGD res=64 40ep] Ep  29/40  loss=0.1455  acc=0.9445  F1=0.9364  ECE=0.0180  (48.5s)
+[SGD res=64 40ep] Ep  30/40  loss=0.1596  acc=0.9439  F1=0.9397  ECE=0.0118  (48.6s)
+[SGD res=64 40ep] Ep  31/40  loss=0.1539  acc=0.9182  F1=0.8932  ECE=0.0111  (48.6s)
+[SGD res=64 40ep] Ep  32/40  loss=0.1410  acc=0.9422  F1=0.9341  ECE=0.0055  (48.5s)
+[SGD res=64 40ep] Ep  33/40  loss=0.1300  acc=0.9188  F1=0.9028  ECE=0.0169  (48.6s)
+[SGD res=64 40ep] Ep  34/40  loss=0.1317  acc=0.9159  F1=0.9098  ECE=0.0203  (48.6s)
+[SGD res=64 40ep] Ep  35/40  loss=0.1480  acc=0.9539  F1=0.9496  ECE=0.0114  (48.5s)
+[SGD res=64 40ep] Ep  36/40  loss=0.1248  acc=0.9346  F1=0.9183  ECE=0.0125  (48.5s)
+[SGD res=64 40ep] Ep  37/40  loss=0.1341  acc=0.9293  F1=0.9166  ECE=0.0162  (48.6s)
+[SGD res=64 40ep] Ep  38/40  loss=0.1166  acc=0.9428  F1=0.9347  ECE=0.0122  (48.6s)
+[SGD res=64 40ep] Ep  39/40  loss=0.1130  acc=0.9626  F1=0.9575  ECE=0.0127  (48.6s)
+[SGD res=64 40ep] Ep  40/40  loss=0.1054  acc=0.9486  F1=0.9423  ECE=0.0099  (48.6s)
+
+  ─ 30 Epoch 시점: Macro-F1=0.9397  ACC=0.9439  ECE=0.0118
+  ─ 31~40 구간 최고 Macro-F1: 0.9575
+  ─ 최고 성능 개선 폭 (31~40 - 30ep): +0.0178
+
+  체크포인트 저장 완료: outputs/pilot/pilot_final.pt
+  저장 직전 ACC=0.948598  F1=0.942301  ECE=0.009930
+
+✓ pilot_train.py 완료.
