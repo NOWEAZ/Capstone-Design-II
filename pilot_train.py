@@ -314,6 +314,8 @@ def pilot_resolution_comparison(device: torch.device) -> int:
     for res in [28, 64]:
         train_loader, val_loader = build_loaders(image_size=res)
 
+        set_seed(PILOT_SEED)
+
         model = load_init_weights(PILOT_SEED, device)
         opt   = _build_optimizer("sgd", model)
 
@@ -347,6 +349,7 @@ def pilot_optimizer_comparison(device: torch.device,
 
     results: dict[str, float] = {}
     for opt_name in ["sgd", "adam"]:
+        set_seed(PILOT_SEED)
         model = load_init_weights(PILOT_SEED, device)
         opt   = _build_optimizer(opt_name, model)
 
@@ -378,6 +381,7 @@ def pilot_epoch_comparison(device: torch.device,
     print("="*60)
 
     train_loader, val_loader = build_loaders(image_size=best_res)
+    set_seed(PILOT_SEED)
     model = load_init_weights(PILOT_SEED, device)
     opt   = _build_optimizer(best_opt, model)
 
