@@ -1,13 +1,28 @@
 # 🛠️ 설계 의사결정 및 코드 수정 내역서 (Design Decisions & Changelog)
 
-본 문서는 Fed-ISIC2019 연합학습 프로젝트를 구축하고 고도화하는 과정에서 논의된 **6가지 핵심 기술적 의사결정 사항, 코드 반영 내역, 그리고 학술적·실험적 근거**를 정리한 문서입니다. 보고서 및 논문 작성 시 실험 설계 근거(Experimental Setup & Justification)로 바로 활용할 수 있습니다.
+본 문서는 **Fed-ISIC2019 의료 영상 연합학습 프로젝트**를 설계·구현·검증하는 과정에서 이루어진 **핵심 기술적 의사결정(섹션 1~6)** 과 **코드 감사 및 안정화 내역(섹션 7~8)** 을 기술적·학술적 근거와 함께 정리한 문서입니다. 보고서 및 논문 작성 시 실험 설계 근거(Experimental Setup & Justification)로 바로 활용할 수 있습니다.
+
+---
+
+## 📋 전체 의사결정 및 수정 요약표
+
+| 구분 | 항목 | 최종 결정 및 반영 내용 | 핵심 근거 요약 |
+| :---: | :--- | :--- | :--- |
+| **1** | 정규화 계층 | `GroupNorm(2)` 대신 **`BatchNorm2d` 유지** | ImageNet 사전학습 가중치 분포 붕괴 방지 및 뒷단 고채널(320, 1280) 특징 해상도 보존 |
+| **2** | 평가지표 확장 | **`ECE`** 및 **`macro_f1_gap`(최고-최저 격차)** 추가 | 의료 AI 필수 요건인 신뢰도 보정(Calibration)과 병원 간 공정성(Client Fairness) 정량화 |
+| **3** | ECE 구간 수 | `n_bins=10` 대신 **`n_bins=15` 채택** | 학계 표준(Guo et al., ICML 2017) 준수 및 8클래스 고신뢰 구간(`[0.7, 1.0]`) 해상도 확보 |
+| **4** | 다중 시드 전략 | **방식 B (1시드 탐색 $\rightarrow$ 최종 3시드 검증)** | 분류기 초기화·배치 셔플 노이즈 제거(`Mean ± Std`) 및 코랩 탐색 시간 40% 이상 절감 |
+| **5** | 라운드 & 에폭 | **`rounds=20`**, 연합학습 **`local_epochs=2`** *(Centralized `1`)* | 연합학습 가중치 희석 보완(40 로컬 에폭 효과) 및 Client Drift 유발로 FedAvg vs FedProx 변별력 확보 |
+| **6** | 통신량 비교 | **목표 정확도 도달 누적 통신량(`Communication-to-Accuracy`)** | 1라운드 통신량(91.9 MB)은 동일하므로, 목표 성능 도달까지 소모된 누적 통신 비용(MB)으로 효율성 입증 |
+| **7** | 1차 코드 감사 | 중복 추론 제거, `top3` 테스트셋 일치, `BN` 방어 등 4건 | 매 라운드 평가 속도 2배 향상, 학습·평가 도메인 일치, 마지막 배치 크기 1 크래시 원천 차단 |
+| **8** | 2·3차 코드 감사 | 데이터 준비, 옵티마이저·손실·가중치 보정, `--resume` 등 | 코랩 실행 완결성 확보, 실험 공정성·보고 타당성(Final vs Best) 확립, 세션 중단 복구 지원 |
 
 ---
 
 ## 1. 정규화 계층 선택: `GroupNorm(2 groups)` 대신 `BatchNorm` 유지
 
 ### 📌 검토 내용
-- Non-IID 연합학습 환경에서 병원별 배치 통계량(`running_mean`, `running_var`) 충돌을 피하기 위해 `EfficientNet-B0` 내부의 `BatchNorm2d`를 `GroupNorm(num_groups=2)`로 교체하는 방안을 검토함.
+- Non-IID 연합학습 환경에서 병원별 미니배치 통계량(`running_mean`, `running_var`) 충돌을 피하기 위해 `EfficientNet-B0` 내부의 `BatchNorm2d`를 `GroupNorm(num_groups=2)`로 교체하는 방안을 검토함.
 
 ### ✅ 최종 결정
 - **기존 `BatchNorm2d`를 그대로 유지하기로 결정.**
@@ -53,7 +68,7 @@
    - 현대 신경망 Calibration 연구의 기준 논문인 **Guo et al., *"On Calibration of Modern Neural Networks"* (ICML 2017)** 과 PyTorch 공식 지표인 `torchmetrics.CalibrationError` 모두 기본값으로 `n_bins=15`를 사용함.
 2. **8클래스 분류의 고신뢰 구간 해상도(Resolution) 확보**:
    - 8클래스 분류에서 최대 소프트맥스 확률값($\max_c \hat{p}_c$)의 이론적 하한은 $\frac{1}{8} = 0.125$이며, 학습이 진행될수록 예측 확률이 `[0.7, 1.0]` 구간에 밀집됨.
-   - `n_bins=10`(구간 폭 `0.1`)은 고신뢰 구간을 너무 넓게 묶어 과신(Over-confidence) 오차를 둔감하게 만드는 반면, `n_bins=15`(구간 폭 약 `0.067`)는 고신뢰 영역을 더 세밀하게 쪼개어 보정 오차를 정밀하게 포착함. (Global Test 샘플 수가 약 4,600개 이상이므로 15개 구간에서도 표본 부족 문제가 발생하지 않음.)
+   - `n_bins=10`(구간 폭 `0.1`)은 고신뢰 구간을 너무 넓게 묶어 과신(Over-confidence) 오차를 둔감하게 만드는 반면, `n_bins=15`(구간 폭 약 `0.067`)는 고신뢰 영역을 더 세밀하게 쪼개어 보정 오차를 정밀하게 포착함. (Global Test 샘플 수가 `top3` 3,946개 / `merge6` 4,650개로 충분하므로 15개 구간에서도 표본 부족 문제가 발생하지 않음.)
 
 ---
 
@@ -85,7 +100,7 @@
 
 ### 💡 기술적 근거
 1. **연합학습의 가중치 희석 보완 및 수렴 보장**:
-   - `batch_size=32` 기준 Client 1, 2의 1 에폭은 약 99 스텝에 불과함. 연합학습은 매 라운드 서버 집계 시 서로 다른 병원 가중치가 평균화되면서 학습 방향이 희석되므로, `local_epochs=1`로 20 라운드만 돌리면 충분히 수렴하지 못한 채 종료될 위험이 있음.
+   - `batch_size=32` 기준 Client 1(3,163장)과 Client 2(2,691장)의 1 에폭은 각각 약 99 스텝, 85 스텝에 불과함. 연합학습은 매 라운드 서버 집계 시 서로 다른 병원 가중치가 평균화되면서 학습 방향이 희석되므로, `local_epochs=1`로 20 라운드만 돌리면 충분히 수렴하지 못한 채 종료될 위험이 있음.
    - `local_epochs=2`로 설정하면 테스트셋 평가(Evaluation) 오버헤드는 20회로 동일하게 아끼면서도 실질적인 로컬 학습량을 40 에폭으로 확보해 20 라운드 내 안정적 수렴을 보장함.
 2. **FedAvg vs FedProx 변별력(Client Drift) 극대화**:
    - `local_epochs=1`에서는 로컬 업데이트 스텝이 너무 짧아 각 병원의 가중치가 글로벌 모델에서 멀어질 틈이 없으므로 FedAvg와 FedProx 차이가 미미함.
@@ -109,27 +124,54 @@
 
 ---
 
-## 7. 최종 코드 감사(Code Audit)를 통한 최적화 및 잠재적 결함 수정 (4건)
+## 7. 1차 코드 감사(Code Audit): 속도 최적화 및 런타임 방어 (4건)
 
-전체 파이프라인의 실행 속도, 실험 정합성, 런타임 안정성을 최종 점검하여 다음 4가지 항목을 개선함.
+| 번호 | 대상 파일 | 수정 내용 | 기술적·실험적 근거 |
+| :---: | :--- | :--- | :--- |
+| **7.1** | `federated_core.py` | **`evaluate_model` 중복 추론 제거** | 기존에는 Global Test 로더를 추론한 뒤 `client_test_loaders`를 다시 추론해 매 라운드 2번씩 추론했음. 클라이언트별 예측값을 `np.concatenate`하여 **단 1회 추론으로 Global 지표와 병원별 공정성 지표를 동시에 산출(평가 속도 2배 향상)**. |
+| **7.2** | `data_utils.py` | **`top3` 모드 Global Test 범위 일치** | `FedIsic2019(train=False, pooled=True)` 대신 `ConcatDataset(client_test_datasets)`를 사용하여, `top3`에서는 센터 0~2만, `merge6`에서는 센터 0~5 전체를 평가하도록 학습·평가 도메인을 엄밀히 일치시킴. |
+| **7.3** | `federated_core.py` | **`BatchNorm2d` 단일 샘플 배치 방어** | `N % batch_size == 1`일 때 마지막 배치(크기 1)에서 `BatchNorm2d` 분산 계산 에러(`ValueError`)가 발생하는 것을 막기 위해 `if images.size(0) == 1: continue` 추가. `drop_last=True`로 인한 샘플 손실 없이 크래시만 예방함. |
+| **7.4** | `main.py` | **`Centralized`의 `weight_divergence = 0.0` 고정** | `Centralized`에서 이전 에폭과 현재 에폭의 차이를 기록하면 연합학습의 '동일 라운드 내 클라이언트-서버 간 괴리(Client Drift)'와 물리적 의미가 달라 그래프 해석을 왜곡하므로 `0.0`으로 통일하고 불필요한 `deepcopy` 메모리를 절약함. |
 
-### 7.1 `evaluate_model` 테스트셋 중복 추론(Double Inference) 제거 — 평가 속도 2배 향상
-- **기존 문제**: `federated_core.py`의 `evaluate_model`에서 Global Test 로더(`test_loader`) 전체를 먼저 1회 추론한 뒤, 클라이언트 간 공정성 지표(`macro_f1_gap`)를 구하기 위해 `client_test_loaders`를 처음부터 다시 추론하여 동일한 테스트 이미지를 매 라운드 2번씩 GPU에 통과시키는 비효율이 존재했음.
-- **수정 내역**: `client_test_loaders`를 단 1회씩만 순회하며 각 클라이언트의 `Macro-F1`을 계산하고, 동시에 수집된 예측 확률(`y_prob`), 예측값(`y_pred`), 정답(`y_true`), 가중 손실을 하나로 결합(`np.concatenate`)하여 Global 평가지표(`balanced_acc`, `macro_f1`, `ece`, `loss`)를 한 번에 산출하도록 통합함.
-- **근거**: 수치적 결과는 100% 동일하게 유지하면서 매 라운드 평가(Evaluation)에 소요되는 GPU 추론 시간을 정확히 절반(50%)으로 단축함.
+---
 
-### 7.2 `mode='top3'` 시나리오의 Global Test 데이터셋 범위 정합성 확보
-- **기존 문제**: `data_utils.py`에서 `test_dataset = FedIsic2019(train=False, pooled=True)`를 고정 사용하여, 센터 0, 1, 2만 참여하는 `mode='top3'` 실험에서도 학습에 전혀 참여하지 않은 센터 3, 4, 5의 테스트 샘플이 Global 평가에 혼입되었음.
-- **수정 내역**: `test_dataset = ConcatDataset(client_test_datasets)`로 변경함.
-- **근거**: `top3` 모드에서는 참여 병원(센터 0, 1, 2)의 통합 테스트셋으로, `merge6` 모드에서는 전체 6개 병원(센터 0~5)의 통합 테스트셋으로 평가 도메인을 학습 도메인과 엄밀하게 일치시킴.
+## 8. 2·3차 최종 코드 감사: 코랩 실행 완결성·실험 공정성·보고 방법론·Resume 보완
 
-### 7.3 `BatchNorm2d` 유지에 따른 마지막 미니배치 크기 1(`batch_size == 1`) 런타임 에러 방어
-- **기존 문제**: `EfficientNet-B0`에서 `BatchNorm2d`를 유지할 경우, 특정 클라이언트의 학습 샘플 수 $N$이 배치 크기로 나누어떨어지지 않고 마지막 배치에 샘플이 딱 1장(`N % batch_size == 1`)만 남으면 `BatchNorm2d`가 채널 분산을 계산할 수 없어 `ValueError` 크래시가 발생함.
-- **수정 내역**: `federated_core.py`의 `train_one_client` 학습 루프 초입에 `if images.size(0) == 1: continue` 방어 로직을 추가함.
-- **근거**: 전체 배치에 대해 `drop_last=True`를 켜서 매 에폭마다 최대 `batch_size - 1`개의 데이터를 버리는 손실을 피하면서도, `N % batch_size == 1`인 예외적인 상황에서만 단일 샘플 배치를 건너뛰어 런타임 중단 위험을 원천 차단함.
+### 8.1 코랩 환경 실행 완결성 확보 (`fed_isic2019_colab.ipynb`, `main.py`, `data_utils.py`)
+1. **FLamby 공식Editable 설치 및 커널 경로 등록 (Phase 1-2)**:
+   - **문제**: FLamby는 PyPI 단독 설치(`pip install flamby[isic2019]`)가 지원되지 않거나 `git+https` 설치 시 `isic2019` 의존성이 누락됨.
+   - **해결 및 근거**: 공식 가이드대로 `git clone` 후 `pip install -e ".[isic2019]"`를 수행하고, 커널 재시작 없이 즉시 import되도록 `sys.path`에 등록함.
+2. **ISIC2019 데이터 다운로드·전처리 및 Drive tar 캐싱 (Phase 1-3, `--data_path`)**:
+   - **문제**: 코랩은 세션마다 로컬 디스크가 초기화되어 매번 9GB 원본 다운로드 및 리사이즈를 반복할 수 없으며, 반대로 Google Drive(FUSE 마운트)에서 수만 장의 이미지를 직접 읽으면 I/O 병목으로 학습이 극도로 느려짐.
+   - **해결 및 근거**: 최초 1회만 `download_isic.py` → `resize_images.py`를 실행해 전처리 폴더를 Drive에 단일 `tar` 파일로 보관하고, 이후 세션에서는 로컬 디스크(`/content/isic_data`)로 빠르게 압축 해제한 뒤 `main.py --data_path`로 전달하는 구조("Drive 보관 + 로컬 고속 I/O")를 채택함.
+3. **FLamby 버전별 `FedIsic2019` 시그니처 호환성 방어 (`data_utils.py`)**:
+   - **해결 및 근거**: FLamby 커밋 버전에 따라 `FedIsic2019.__init__`에 `debug` 인자가 없는 경우가 있으므로 `inspect.signature`로 확인 후 전달하여 버전 차이로 인한 `TypeError`를 방지함.
 
-### 7.4 `Centralized` 학습 시 `weight_divergence` 계산 정리 및 메모리 절약
-- **기존 문제**: `main.py`에서 `method == 'centralized'`일 때 매 라운드 이전 모델(`prev_model`)을 `deepcopy`하여 현재 모델과의 L2 거리를 `weight_divergence`에 기록했음.
-- **수정 내역**: `Centralized` 분기에서 불필요한 `copy.deepcopy(global_model)`를 제거하고 `avg_divergence = 0.0`으로 고정함.
-- **근거**: 연합학습의 `weight_divergence`는 **"동일 라운드 내 글로벌 모델과 각 로컬 모델 간의 파라미터 괴리(Client Drift)"** 를 측정하는 지표임. 반면 `Centralized`의 이전 에폭 대비 변화량은 물리적 의미가 전혀 다른 '에폭 간 이동 거리'이므로, 같은 그래프에 플롯할 때 발생하는 해석상의 왜곡을 방지하고 불필요한 GPU 메모리 복사를 제거함.
+### 8.2 실험 공정성 및 수식 정합성 보정 (`federated_core.py`, `main.py`, `data_utils.py`)
+1. **`Centralized` 학습 시 Adam 옵티마이저 모멘텀 유지**:
+   - **문제**: `train_one_client`가 매번 새 `Adam`을 생성하면 `Centralized`에서는 매 에폭마다 1·2차 모멘텀($m_t, v_t$)이 초기화되어 상한 기준선(Upper-bound)이 불리하게 측정됨.
+   - **해결 및 근거**: 연합학습은 표준(McMahan et al., 2017)에 따라 라운드마다 로컬 옵티마이저를 초기화하되, `Centralized`는 루프 외부에서 생성한 `central_optimizer`를 전달해 에폭 간 모멘텀을 유지하도록 보정함.
+2. **FedProx의 `train_loss` 기록에서 근접 정규화 항 분리**:
+   - **문제**: 역전파 손실 `CE + (μ/2)·‖w − w_g‖²`를 그대로 `train_loss`에 기록하면 FedAvg의 순수 `CE` 손실과 스케일이 달라 직접 비교할 수 없음.
+   - **해결 및 근거**: 역전파(`loss.backward()`)에는 근접 항을 포함한 전체 손실을 사용하되, 로깅용 `train_loss`에는 순수 Cross-Entropy(`ce_loss`)만 누적하여 모든 기법 간 학습 손실을 동일 기준으로 비교할 수 있게 함.
+3. **결측 클래스 보유 병원의 역빈도 가중치 정규화 스케일 보정 (`data_utils.py`)**:
+   - **문제**: Fed-ISIC2019의 센터 1~5는 8개 병변 클래스 중 일부 클래스 샘플 수가 `0`개임. 전체 8개 클래스 평균(`weights.mean()`)으로 나누면 보유 클래스 수가 적은 병원일수록 실제 존재하는 클래스의 가중치(유효 학습률 스케일)가 부풀려짐.
+   - **해결 및 근거**: 실제 샘플이 존재하는 클래스들의 평균(`weights[counts > 0].mean()`)으로 정규화하여, 보유 클래스 수와 무관하게 모든 병원의 유효 손실 스케일이 항상 `1.0`으로 유지되도록 통일함.
+4. **`evaluate_model` Fallback 시 `macro_f1_gap`의 `NaN` 처리**:
+   - **해결 및 근거**: 클라이언트별 테스트 로더가 없을 때 '클래스별 F1 격차'로 대체하면 지표의 정의(병원 간 공정성)가 달라지므로 `NaN`으로 명시 처리함.
 
+### 8.3 보고 방법론 및 분석 노트북 고도화 (`fed_isic2019_colab.ipynb`, `PROJECT_OVERVIEW.md`)
+1. **Final(마지막 라운드) 지표와 Best(최고 라운드) 지표 분리 보고**:
+   - **문제**: FLamby ISIC2019에는 별도 validation split이 없어 test 셋 최고 라운드(`Best`)만 보고하면 선택 편향(Selection Bias)으로 인해 성능이 낙관적으로 과대평가됨.
+   - **해결 및 근거**: 사전에 고정된 20 라운드 종료 시점의 **Final `Mean ± Std` 요약표(`summary_final_mean_std_*.csv`)** 를 주 결과로 제시하고, **Best `Mean ± Std` 요약표(`summary_best_mean_std_*.csv`)** 를 참고용으로 함께 출력하도록 구성함.
+2. **탈락한 $\mu$ 후보 자동 필터링 및 목표 정확도 도달 통신량 집계표 추가**:
+   - **해결 및 근거**: Stage 1에서 탐색만 한 $\mu$ 후보(1시드)가 최종 3시드 비교표에 섞이지 않도록 `BEST_MU` 기준으로 자동 필터링하고, 목표 정확도 도달 여부(`Reached` 비율), 평균 도달 라운드, 평균 누적 통신량(MB) 집계표(`comm_to_target_*.csv`)를 추가함.
+3. **문서 내 데이터셋 수치 및 센터 명칭 정정**:
+   - FLamby 공식 분할에 맞춰 센터 1(ViDIR MoleMax: 학습 3,163장 / 테스트 791장), 센터 2(ViDIR Modern: 학습 2,691장 / 테스트 672장), 그리고 모드별 총 샘플 수(`top3`: 학습 15,784장 / 테스트 3,946장, `merge6`: 학습 18,597장 / 테스트 4,650장)를 정확히 반영함.
+
+### 8.4 세션 중단 대비 이어서 학습(`--resume`) 및 원자적(Atomic) 체크포인트 저장 (`main.py`)
+- **수정 내역**:
+  - 매 라운드 종료 시 `last_{exp}_seed{seed}.pt`에 모델 가중치, (`Centralized`) 옵티마이저 상태, 현재 최고 `balanced_acc`, Python/NumPy/PyTorch/CUDA 난수 상태 및 DataLoader `Generator` 상태를 기록함.
+  - `--resume` 실행 시 설정 일치 여부를 검증한 뒤 마지막 완료 라운드 다음부터 이어서 학습하며, CSV 내 미완성·중복 행을 자동 정리(`_truncate_csv`)함.
+  - 저장 중 코랩 세션이 끊겨 파일이 깨지는 현상을 막기 위해 `.tmp` 파일 작성 후 `os.replace`로 교체하는 원자적 저장(`_atomic_torch_save`)을 적용하고, 재접속 시 다른 기종의 GPU가 할당되더라도 에러 없이 복원되도록 예외 방어를 추가함.
+- **근거**: 코랩 환경에서 약 50분간 진행되는 다중 시드 실험 도중 런타임 연결이 끊기더라도 처음부터 재실행할 필요 없이 즉시 이어서 실험을 완주할 수 있도록 실용적 안정성을 확보함.
