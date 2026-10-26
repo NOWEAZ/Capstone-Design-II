@@ -106,6 +106,10 @@ def train_one_client(
 
     for _ in range(local_epochs):
         for images, targets in tqdm(dataloader, desc="Local Train", leave=False):
+            # BatchNorm2d는 학습 시 미니배치 크기가 1이면 분산 계산 불가로 에러가 발생하므로 방어 처리
+            if images.size(0) == 1:
+                continue
+
             images = images.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True).long().view(-1)
 
@@ -289,35 +293,52 @@ def evaluate_model(
     if criterion is None:
         criterion = nn.CrossEntropyLoss()
 
-    avg_loss, y_prob, y_pred, y_true = _collect_predictions(
-        model, dataloader, device, criterion, desc="Evaluating Global"
-    )
-
-    bal_acc = float(balanced_accuracy_score(y_true, y_pred))
-    macro_f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
-    ece = compute_ece(y_prob, y_true, n_bins=n_bins)
-
-    # 클라이언트별 테스트 로더가 있으면 클라이언트 간 최고-최저 Macro-F1 계산
     if client_test_loaders is None and hasattr(dataloader, "client_test_loaders"):
         client_test_loaders = dataloader.client_test_loaders
 
+    # 클라이언트별 테스트 로더가 존재하면 단 1번의 순회로 클라이언트별 지표와 Global 통합 지표를 동시에 계산 (중복 추론 방지)
     if client_test_loaders:
         client_f1s = []
+        global_probs = []
+        global_preds = []
+        global_targets = []
+        total_loss_sum = 0.0
+        total_sample_cnt = 0
+
         for idx, c_loader in enumerate(client_test_loaders):
-            _, _, c_pred, c_true = _collect_predictions(
+            c_loss, c_prob, c_pred, c_true = _collect_predictions(
                 model, c_loader, device, criterion, desc=f"Eval Client {idx}"
             )
             c_f1 = float(f1_score(c_true, c_pred, average="macro", zero_division=0))
             client_f1s.append(c_f1)
+
+            n_c = len(c_true)
+            total_loss_sum += c_loss * n_c
+            total_sample_cnt += n_c
+            global_probs.append(c_prob)
+            global_preds.append(c_pred)
+            global_targets.append(c_true)
+
+        y_prob = np.concatenate(global_probs, axis=0)
+        y_pred = np.concatenate(global_preds, axis=0)
+        y_true = np.concatenate(global_targets, axis=0)
+        avg_loss = total_loss_sum / max(total_sample_cnt, 1)
+
         max_macro_f1 = float(max(client_f1s))
         min_macro_f1 = float(min(client_f1s))
         macro_f1_gap = float(max_macro_f1 - min_macro_f1)
     else:
-        # 클라이언트별 테스트 로더가 없을 경우 클래스별 F1의 최고-최저 차이로 대체
+        avg_loss, y_prob, y_pred, y_true = _collect_predictions(
+            model, dataloader, device, criterion, desc="Evaluating Global"
+        )
         per_class_f1 = f1_score(y_true, y_pred, average=None, zero_division=0)
         max_macro_f1 = float(np.max(per_class_f1))
         min_macro_f1 = float(np.min(per_class_f1))
         macro_f1_gap = float(max_macro_f1 - min_macro_f1)
+
+    bal_acc = float(balanced_accuracy_score(y_true, y_pred))
+    macro_f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+    ece = compute_ece(y_prob, y_true, n_bins=n_bins)
 
     return {
         "loss": avg_loss,

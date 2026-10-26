@@ -193,7 +193,6 @@ def main():
     # 5. 라운드별 학습 및 평가 루프
     for r in range(1, args.rounds + 1):
         if args.method == "centralized":
-            prev_model = copy.deepcopy(global_model)
             global_model, train_loss = train_one_client(
                 model=global_model,
                 dataloader=centralized_loader,
@@ -204,7 +203,8 @@ def main():
                 mu=0.0,
                 global_model=None,
             )
-            avg_divergence = compute_weight_divergence(prev_model, global_model)
+            # Centralized는 단일 글로벌 모델만 존재하므로 클라이언트 간 가중치 발산(Client Drift)은 0.0
+            avg_divergence = 0.0
         else:
             effective_mu = args.mu if args.method == "fedprox" else 0.0
             local_models = []

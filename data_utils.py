@@ -191,8 +191,9 @@ def get_dataloaders(
         generator=central_gen,
     )
 
-    # 3. Global Test DataLoader (전체 센터 통합 테스트셋) 및 클라이언트별 Test DataLoader
-    test_dataset = FedIsic2019(train=False, pooled=True, **flamby_kwargs)
+    # 3. Global Test DataLoader (활성 클라이언트 테스트셋 통합) 및 클라이언트별 Test DataLoader
+    # top3 모드에서는 센터 0,1,2의 통합 테스트셋, merge6 모드에서는 전체 6개 센터(0~5)의 통합 테스트셋으로 일치시킴
+    test_dataset = ConcatDataset(client_test_datasets)
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
