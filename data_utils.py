@@ -1,7 +1,15 @@
+import random
 import numpy as np
 import torch
 from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from flamby.datasets.fed_isic2019 import FedIsic2019
+
+
+def _seed_worker(worker_id: int):
+    """DataLoader 멀티프로세싱 워커의 난수 시드를 고정합니다."""
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 def _extract_labels_from_dataset(dataset: Dataset) -> np.ndarray:
@@ -83,6 +91,7 @@ def get_dataloaders(
     num_workers: int = 4,
     data_path: str | None = None,
     debug: bool = False,
+    seed: int | None = None,
 ):
     """
     FLamby의 FedIsic2019 데이터셋을 사용해 클라이언트별 DataLoader,
@@ -94,6 +103,7 @@ def get_dataloaders(
         num_workers: DataLoader 워커 프로세스 수
         data_path: FLamby 데이터 경로 (None이면 FLamby 기본 설정 사용)
         debug: FLamby debug 모드 여부
+        seed: 재현성을 위한 난수 시드 (None이면 고정하지 않음)
 
     Returns:
         tuple: (client_loaders, centralized_loader, test_loader)
@@ -115,37 +125,61 @@ def get_dataloaders(
             FedIsic2019(center=i, train=True, pooled=False, **flamby_kwargs)
             for i in range(3)
         ]
+        client_test_datasets = [
+            FedIsic2019(center=i, train=False, pooled=False, **flamby_kwargs)
+            for i in range(3)
+        ]
     else:
         # mode == 'merge6': 전체 6개 센터(0~5)를 3개 클라이언트로 병합
         # 대형 센터(0, 1, 2) 각각에 소형 센터(3, 4, 5)를 페어링하여 3개 클라이언트로 구성
         center_groups = [(0, 3), (1, 4), (2, 5)]
         client_datasets = []
+        client_test_datasets = []
         for group in center_groups:
-            merged = ConcatDataset(
+            merged_train = ConcatDataset(
                 [
                     FedIsic2019(center=c, train=True, pooled=False, **flamby_kwargs)
                     for c in group
                 ]
             )
-            client_datasets.append(merged)
+            merged_test = ConcatDataset(
+                [
+                    FedIsic2019(center=c, train=False, pooled=False, **flamby_kwargs)
+                    for c in group
+                ]
+            )
+            client_datasets.append(merged_train)
+            client_test_datasets.append(merged_test)
 
     pin_memory = torch.cuda.is_available()
+    worker_init_fn = _seed_worker if seed is not None else None
 
     # 1. 3개 클라이언트 학습 DataLoader
-    client_loaders = [
-        DataLoader(
-            ds,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            drop_last=False,
+    client_loaders = []
+    for idx, ds in enumerate(client_datasets):
+        gen = None
+        if seed is not None:
+            gen = torch.Generator()
+            gen.manual_seed(seed + idx)
+        client_loaders.append(
+            DataLoader(
+                ds,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                drop_last=False,
+                worker_init_fn=worker_init_fn,
+                generator=gen,
+            )
         )
-        for ds in client_datasets
-    ]
 
     # 2. Centralized 통합 학습 DataLoader
     centralized_dataset = ConcatDataset(client_datasets)
+    central_gen = None
+    if seed is not None:
+        central_gen = torch.Generator()
+        central_gen.manual_seed(seed + 100)
     centralized_loader = DataLoader(
         centralized_dataset,
         batch_size=batch_size,
@@ -153,9 +187,11 @@ def get_dataloaders(
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=False,
+        worker_init_fn=worker_init_fn,
+        generator=central_gen,
     )
 
-    # 3. Global Test DataLoader (전체 센터 통합 테스트셋)
+    # 3. Global Test DataLoader (전체 센터 통합 테스트셋) 및 클라이언트별 Test DataLoader
     test_dataset = FedIsic2019(train=False, pooled=True, **flamby_kwargs)
     test_loader = DataLoader(
         test_dataset,
@@ -165,6 +201,19 @@ def get_dataloaders(
         pin_memory=pin_memory,
         drop_last=False,
     )
+
+    # 클라이언트 간 최고-최저 Macro-F1(공정성 지표) 계산을 위해 클라이언트별 테스트 로더를 속성으로 연결
+    test_loader.client_test_loaders = [
+        DataLoader(
+            ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=False,
+        )
+        for ds in client_test_datasets
+    ]
 
     return client_loaders, centralized_loader, test_loader
 

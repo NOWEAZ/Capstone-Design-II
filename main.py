@@ -2,17 +2,33 @@ import argparse
 import copy
 import csv
 import os
+import random
+import numpy as np
 import torch
 import torch.nn as nn
 
 from data_utils import compute_class_weights, get_dataloaders
 from federated_core import (
     build_efficientnet_b0,
+    compute_model_size_mb,
+    compute_round_comm_mb,
     compute_weight_divergence,
     evaluate_model,
     server_aggregate,
     train_one_client,
 )
+
+
+def set_seed(seed: int):
+    """실험 재현성을 위해 Python, NumPy, PyTorch(CPU/GPU) 난수 시드를 고정합니다."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def parse_args():
@@ -42,8 +58,8 @@ def parse_args():
     parser.add_argument(
         "--local_epochs",
         type=int,
-        default=1,
-        help="각 라운드당 클라이언트 로컬 에폭 수",
+        default=2,
+        help="각 라운드당 클라이언트 로컬 에폭 수 (연합학습 권장: 2, centralized 권장: 1)",
     )
     parser.add_argument(
         "--batch_size",
@@ -75,19 +91,27 @@ def parse_args():
         default=4,
         help="DataLoader num_workers 수",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="재현성 및 다중 시드 실험을 위한 난수 시드 (기본값: 42)",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    set_seed(args.seed)
     os.makedirs(args.save_dir, exist_ok=True)
 
+    effective_mu = args.mu if args.method == "fedprox" else 0.0
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[Info] Using device: {device}")
+    print(f"[Info] Using device: {device} | Seed: {args.seed}")
     print(
         f"[Info] Method: {args.method} | Mode: {args.mode} | Rounds: {args.rounds} | "
         f"Local Epochs: {args.local_epochs} | Batch Size: {args.batch_size} | "
-        f"LR: {args.lr} | Mu: {args.mu if args.method == 'fedprox' else 0.0}"
+        f"LR: {args.lr} | Mu: {effective_mu}"
     )
 
     # 1. DataLoader 준비
@@ -95,6 +119,7 @@ def main():
         mode=args.mode,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        seed=args.seed,
     )
 
     num_clients = len(client_loaders)
@@ -118,23 +143,45 @@ def main():
         eval_weights = compute_class_weights(centralized_loader, num_classes=8, device=device)
         criterion = nn.CrossEntropyLoss(weight=eval_weights)
 
-    # 3. 글로벌 모델 초기화
+    # 3. 글로벌 모델 초기화 및 1라운드당 통신량(MB) 계산
     global_model = build_efficientnet_b0(num_classes=8, pretrained=True).to(device)
+    model_size_mb = compute_model_size_mb(global_model)
+    round_comm_mb = (
+        0.0
+        if args.method == "centralized"
+        else compute_round_comm_mb(global_model, num_clients)
+    )
+    print(
+        f"[Info] Model Size: {model_size_mb:.2f} MB | "
+        f"Comm Volume per Round (Down+Up): {round_comm_mb:.2f} MB"
+    )
 
-    # 4. 결과 기록용 CSV 및 모델 저장 경로 설정
-    csv_filename = f"{args.method}_{args.mode}_metrics.csv"
+    # 4. 결과 기록용 CSV 및 모델 저장 경로 설정 (시드 및 FedProx mu 값 구분)
+    if args.method == "fedprox":
+        exp_tag = f"{args.method}_mu{effective_mu:g}_{args.mode}"
+    else:
+        exp_tag = f"{args.method}_{args.mode}"
+
+    csv_filename = f"{exp_tag}_seed{args.seed}_metrics.csv"
     csv_path = os.path.join(args.save_dir, csv_filename)
-    best_model_path = os.path.join(args.save_dir, f"best_{args.method}_{args.mode}.pt")
+    best_model_path = os.path.join(args.save_dir, f"best_{exp_tag}_seed{args.seed}.pt")
 
     csv_fields = [
         "round",
         "method",
         "mode",
+        "mu",
+        "seed",
         "train_loss",
         "test_loss",
         "balanced_acc",
         "macro_f1",
+        "ece",
+        "max_macro_f1",
+        "min_macro_f1",
+        "macro_f1_gap",
         "weight_divergence",
+        "cumulative_comm_mb",
     ]
 
     with open(csv_path, mode="w", newline="", encoding="utf-8") as f:
@@ -195,7 +242,7 @@ def main():
                 client_sample_counts=client_sample_counts,
             )
 
-        # 글로벌 테스트셋 평가
+        # 글로벌 테스트셋 및 클라이언트별 테스트셋 평가
         eval_metrics = evaluate_model(
             model=global_model,
             dataloader=test_loader,
@@ -205,12 +252,19 @@ def main():
         test_loss = eval_metrics["loss"]
         balanced_acc = eval_metrics["balanced_acc"]
         macro_f1 = eval_metrics["macro_f1"]
+        ece = eval_metrics["ece"]
+        max_macro_f1 = eval_metrics["max_macro_f1"]
+        min_macro_f1 = eval_metrics["min_macro_f1"]
+        macro_f1_gap = eval_metrics["macro_f1_gap"]
+        cumulative_comm_mb = r * round_comm_mb
 
         print(
             f"[Round {r:03d}/{args.rounds:03d}] "
             f"Train Loss: {train_loss:.4f} | Test Loss: {test_loss:.4f} | "
-            f"Balanced Acc: {balanced_acc:.4f} | Macro F1: {macro_f1:.4f} | "
-            f"Weight Div: {avg_divergence:.4f}"
+            f"Bal Acc: {balanced_acc:.4f} | Macro F1: {macro_f1:.4f} "
+            f"(Gap: {macro_f1_gap:.4f} [{min_macro_f1:.4f}~{max_macro_f1:.4f}]) | "
+            f"ECE: {ece:.4f} | Weight Div: {avg_divergence:.4f} | "
+            f"Comm: {cumulative_comm_mb:.1f} MB"
         )
 
         # 매 라운드 결과를 실시간으로 CSV 파일에 기록 (flush 보장)
@@ -218,11 +272,18 @@ def main():
             "round": r,
             "method": args.method,
             "mode": args.mode,
+            "mu": effective_mu,
+            "seed": args.seed,
             "train_loss": round(train_loss, 6),
             "test_loss": round(test_loss, 6),
             "balanced_acc": round(balanced_acc, 6),
             "macro_f1": round(macro_f1, 6),
+            "ece": round(ece, 6),
+            "max_macro_f1": round(max_macro_f1, 6),
+            "min_macro_f1": round(min_macro_f1, 6),
+            "macro_f1_gap": round(macro_f1_gap, 6),
             "weight_divergence": round(avg_divergence, 6),
+            "cumulative_comm_mb": round(cumulative_comm_mb, 2),
         }
         with open(csv_path, mode="a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=csv_fields)
@@ -237,8 +298,15 @@ def main():
                     "round": r,
                     "method": args.method,
                     "mode": args.mode,
+                    "mu": effective_mu,
+                    "seed": args.seed,
                     "balanced_acc": balanced_acc,
                     "macro_f1": macro_f1,
+                    "ece": ece,
+                    "max_macro_f1": max_macro_f1,
+                    "min_macro_f1": min_macro_f1,
+                    "macro_f1_gap": macro_f1_gap,
+                    "cumulative_comm_mb": cumulative_comm_mb,
                     "model_state_dict": global_model.state_dict(),
                 },
                 best_model_path,
