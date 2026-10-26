@@ -19,6 +19,28 @@ from federated_core import (
 )
 
 
+CSV_FIELDS = [
+    "round",
+    "method",
+    "mode",
+    "mu",
+    "seed",
+    "train_loss",
+    "test_loss",
+    "balanced_acc",
+    "macro_f1",
+    "ece",
+    "max_macro_f1",
+    "min_macro_f1",
+    "macro_f1_gap",
+    "weight_divergence",
+    "cumulative_comm_mb",
+]
+
+# resume 시 기존 체크포인트와 반드시 일치해야 하는 실험 설정 키
+RESUME_CONFIG_KEYS = ["method", "mode", "mu", "seed", "lr", "local_epochs", "batch_size"]
+
+
 def set_seed(seed: int):
     """실험 재현성을 위해 Python, NumPy, PyTorch(CPU/GPU) 난수 시드를 고정합니다."""
     random.seed(seed)
@@ -86,6 +108,13 @@ def parse_args():
         help="로그 CSV 및 최고 성능 모델 가중치(.pt) 저장 디렉토리",
     )
     parser.add_argument(
+        "--data_path",
+        type=str,
+        default=None,
+        help="전처리된 Fed-ISIC2019 데이터 경로 (ISIC_2019_Training_Input_preprocessed 폴더의 상위 경로). "
+             "None이면 FLamby의 dataset_location.yaml 설정을 사용",
+    )
+    parser.add_argument(
         "--num_workers",
         type=int,
         default=4,
@@ -97,7 +126,68 @@ def parse_args():
         default=42,
         help="재현성 및 다중 시드 실험을 위한 난수 시드 (기본값: 42)",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="save_dir에 동일 실험의 last 체크포인트가 있으면 마지막 완료 라운드 다음부터 이어서 학습",
+    )
     return parser.parse_args()
+
+
+def _atomic_torch_save(obj, path: str):
+    """저장 도중 세션이 끊겨도 기존 파일이 손상되지 않도록 임시 파일에 저장 후 교체합니다."""
+    tmp_path = path + ".tmp"
+    torch.save(obj, tmp_path)
+    os.replace(tmp_path, path)
+
+
+def _capture_rng_states(client_loaders, centralized_loader) -> dict:
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "client_loader_generators": [
+            l.generator.get_state() if l.generator is not None else None for l in client_loaders
+        ],
+        "central_loader_generator": (
+            centralized_loader.generator.get_state()
+            if centralized_loader.generator is not None
+            else None
+        ),
+    }
+
+
+def _restore_rng_states(states: dict, client_loaders, centralized_loader):
+    try:
+        random.setstate(states["python"])
+        np.random.set_state(states["numpy"])
+        torch.set_rng_state(states["torch"].cpu())
+        if torch.cuda.is_available() and states.get("cuda") is not None:
+            cuda_states = [s.cpu() for s in states["cuda"]]
+            torch.cuda.set_rng_state_all(cuda_states)
+        for loader, g_state in zip(client_loaders, states.get("client_loader_generators", [])):
+            if loader.generator is not None and g_state is not None:
+                loader.generator.set_state(g_state.cpu())
+        c_state = states.get("central_loader_generator")
+        if centralized_loader.generator is not None and c_state is not None:
+            centralized_loader.generator.set_state(c_state.cpu())
+    except Exception as e:
+        print(f"[Resume Warning] 난수 상태 일부 복원 생략 (GPU/환경 변경 가능성): {e}")
+
+
+def _truncate_csv(csv_path: str, last_round: int):
+    """resume 시 체크포인트 이후에 기록된(중복될) CSV 행을 제거합니다."""
+    rows = []
+    if os.path.exists(csv_path):
+        with open(csv_path, mode="r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = [row for row in reader if int(row["round"]) <= last_round]
+    with open(csv_path, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in CSV_FIELDS})
 
 
 def main():
@@ -119,6 +209,7 @@ def main():
         mode=args.mode,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        data_path=args.data_path,
         seed=args.seed,
     )
 
@@ -156,42 +247,79 @@ def main():
         f"Comm Volume per Round (Down+Up): {round_comm_mb:.2f} MB"
     )
 
+    # Centralized는 에폭 간 Adam 모멘텀을 유지해야 하므로 옵티마이저를 루프 밖에서 1회만 생성
+    # (연합학습은 라운드마다 클라이언트 로컬 옵티마이저를 새로 생성하는 표준 방식을 따름)
+    central_optimizer = (
+        torch.optim.Adam(global_model.parameters(), lr=args.lr)
+        if args.method == "centralized"
+        else None
+    )
+
     # 4. 결과 기록용 CSV 및 모델 저장 경로 설정 (시드 및 FedProx mu 값 구분)
     if args.method == "fedprox":
         exp_tag = f"{args.method}_mu{effective_mu:g}_{args.mode}"
     else:
         exp_tag = f"{args.method}_{args.mode}"
 
-    csv_filename = f"{exp_tag}_seed{args.seed}_metrics.csv"
-    csv_path = os.path.join(args.save_dir, csv_filename)
+    csv_path = os.path.join(args.save_dir, f"{exp_tag}_seed{args.seed}_metrics.csv")
     best_model_path = os.path.join(args.save_dir, f"best_{exp_tag}_seed{args.seed}.pt")
+    last_ckpt_path = os.path.join(args.save_dir, f"last_{exp_tag}_seed{args.seed}.pt")
 
-    csv_fields = [
-        "round",
-        "method",
-        "mode",
-        "mu",
-        "seed",
-        "train_loss",
-        "test_loss",
-        "balanced_acc",
-        "macro_f1",
-        "ece",
-        "max_macro_f1",
-        "min_macro_f1",
-        "macro_f1_gap",
-        "weight_divergence",
-        "cumulative_comm_mb",
-    ]
+    run_config = {
+        "method": args.method,
+        "mode": args.mode,
+        "mu": effective_mu,
+        "seed": args.seed,
+        "lr": args.lr,
+        "local_epochs": args.local_epochs,
+        "batch_size": args.batch_size,
+    }
 
-    with open(csv_path, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=csv_fields)
-        writer.writeheader()
-
+    start_round = 1
     best_balanced_acc = -1.0
 
-    # 5. 라운드별 학습 및 평가 루프
-    for r in range(1, args.rounds + 1):
+    # 5. Resume: 동일 실험의 last 체크포인트가 있으면 이어서 학습
+    if args.resume and os.path.exists(last_ckpt_path):
+        try:
+            ckpt = torch.load(last_ckpt_path, map_location="cpu", weights_only=False)
+        except TypeError:
+            ckpt = torch.load(last_ckpt_path, map_location="cpu")
+        saved_config = ckpt.get("config", {})
+        mismatched = [
+            k for k in RESUME_CONFIG_KEYS if saved_config.get(k) != run_config[k]
+        ]
+        if mismatched:
+            raise ValueError(
+                f"[Resume] 체크포인트 설정과 현재 인자가 다릅니다: "
+                + ", ".join(f"{k} (ckpt={saved_config.get(k)}, now={run_config[k]})" for k in mismatched)
+            )
+
+        global_model.load_state_dict(ckpt["model_state_dict"])
+        global_model.to(device)
+        if central_optimizer is not None and ckpt.get("optimizer_state_dict") is not None:
+            central_optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        best_balanced_acc = ckpt["best_balanced_acc"]
+        start_round = ckpt["round"] + 1
+        _restore_rng_states(ckpt["rng_states"], client_loaders, centralized_loader)
+        _truncate_csv(csv_path, ckpt["round"])
+        print(
+            f"[Resume] {last_ckpt_path} 로드 완료 → Round {start_round}부터 재개 "
+            f"(현재 Best Balanced Acc: {best_balanced_acc:.4f})"
+        )
+        if start_round > args.rounds:
+            print(f"[Resume] 이미 {ckpt['round']} 라운드까지 완료된 실험입니다. 종료합니다.")
+            return
+    else:
+        if args.resume:
+            print("[Resume] 기존 체크포인트가 없어 처음부터 학습합니다.")
+        elif os.path.exists(last_ckpt_path):
+            print(f"[Warning] 기존 체크포인트({last_ckpt_path})를 무시하고 처음부터 학습합니다. 이어서 학습하려면 --resume을 사용하세요.")
+        with open(csv_path, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+            writer.writeheader()
+
+    # 6. 라운드별 학습 및 평가 루프
+    for r in range(start_round, args.rounds + 1):
         if args.method == "centralized":
             global_model, train_loss = train_one_client(
                 model=global_model,
@@ -202,11 +330,11 @@ def main():
                 device=device,
                 mu=0.0,
                 global_model=None,
+                optimizer=central_optimizer,
             )
             # Centralized는 단일 글로벌 모델만 존재하므로 클라이언트 간 가중치 발산(Client Drift)은 0.0
             avg_divergence = 0.0
         else:
-            effective_mu = args.mu if args.method == "fedprox" else 0.0
             local_models = []
             local_losses = []
             divergences = []
@@ -229,7 +357,7 @@ def main():
                 local_losses.append(c_loss)
                 divergences.append(div)
 
-            # 샘플 수 비례 가중 평균으로 글로벌 모델 업데이트 및 평균 손실 계산
+            # 샘플 수 비례 가중 평균으로 글로벌 모델 업데이트 및 평균 손실(CE 기준) 계산
             total_samples = sum(client_sample_counts)
             train_loss = sum(
                 l * n for l, n in zip(local_losses, client_sample_counts)
@@ -260,7 +388,7 @@ def main():
 
         print(
             f"[Round {r:03d}/{args.rounds:03d}] "
-            f"Train Loss: {train_loss:.4f} | Test Loss: {test_loss:.4f} | "
+            f"Train CE: {train_loss:.4f} | Test Loss: {test_loss:.4f} | "
             f"Bal Acc: {balanced_acc:.4f} | Macro F1: {macro_f1:.4f} "
             f"(Gap: {macro_f1_gap:.4f} [{min_macro_f1:.4f}~{max_macro_f1:.4f}]) | "
             f"ECE: {ece:.4f} | Weight Div: {avg_divergence:.4f} | "
@@ -286,20 +414,17 @@ def main():
             "cumulative_comm_mb": round(cumulative_comm_mb, 2),
         }
         with open(csv_path, mode="a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=csv_fields)
+            writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
             writer.writerow(row_data)
             f.flush()
 
         # 최고 balanced_acc 달성 시 .pt 가중치 저장
         if balanced_acc > best_balanced_acc:
             best_balanced_acc = balanced_acc
-            torch.save(
+            _atomic_torch_save(
                 {
                     "round": r,
-                    "method": args.method,
-                    "mode": args.mode,
-                    "mu": effective_mu,
-                    "seed": args.seed,
+                    "config": run_config,
                     "balanced_acc": balanced_acc,
                     "macro_f1": macro_f1,
                     "ece": ece,
@@ -315,6 +440,21 @@ def main():
                 f"  -> [*] Best Balanced Acc 갱신 ({best_balanced_acc:.4f})! 가중치 저장 완료: {best_model_path}"
             )
 
+        # 매 라운드 종료 시 resume용 last 체크포인트 저장 (모델 + 옵티마이저 + 난수 상태)
+        _atomic_torch_save(
+            {
+                "round": r,
+                "config": run_config,
+                "best_balanced_acc": best_balanced_acc,
+                "model_state_dict": global_model.state_dict(),
+                "optimizer_state_dict": (
+                    central_optimizer.state_dict() if central_optimizer is not None else None
+                ),
+                "rng_states": _capture_rng_states(client_loaders, centralized_loader),
+            },
+            last_ckpt_path,
+        )
+
     print(
         f"[Done] 학습 완료. 최고 Balanced Acc: {best_balanced_acc:.4f} | 결과 파일: {csv_path}"
     )
@@ -322,4 +462,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

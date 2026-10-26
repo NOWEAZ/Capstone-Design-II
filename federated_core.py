@@ -69,6 +69,7 @@ def train_one_client(
     device: torch.device | str,
     mu: float = 0.0,
     global_model: nn.Module | None = None,
+    optimizer: torch.optim.Optimizer | None = None,
 ) -> tuple[nn.Module, float]:
     """
     단일 클라이언트(또는 Centralized) 모델을 학습합니다.
@@ -84,9 +85,12 @@ def train_one_client(
         device: 학습 디바이스
         mu: FedProx 근접 항 계수 (0.0이면 FedAvg)
         global_model: FedProx 기준이 되는 글로벌 모델 (None이면 학습 시작 시점의 model 스냅샷 사용)
+        optimizer: 외부에서 유지하는 옵티마이저 (Centralized처럼 에폭 간 Adam 상태를 유지해야 할 때 전달).
+                   None이면 호출 시마다 새 Adam을 생성 (연합학습 로컬 학습의 표준 방식)
 
     Returns:
-        tuple: (학습된 local_model, 평균 train_loss)
+        tuple: (학습된 local_model, 평균 train CE loss)
+            - 반환 손실은 근접 항을 제외한 순수 CE 손실이므로 FedAvg/FedProx 간 직접 비교 가능
     """
     model.to(device)
     model.train()
@@ -99,9 +103,10 @@ def train_one_client(
     else:
         global_params = None
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    if optimizer is None:
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    total_loss = 0.0
+    total_ce_loss = 0.0
     total_samples = 0
 
     for _ in range(local_epochs):
@@ -115,7 +120,8 @@ def train_one_client(
 
             optimizer.zero_grad()
             logits = model(images)
-            loss = criterion(logits, targets)
+            ce_loss = criterion(logits, targets)
+            loss = ce_loss
 
             if mu > 0.0 and global_params is not None:
                 prox_term = torch.tensor(0.0, device=device)
@@ -127,10 +133,10 @@ def train_one_client(
             optimizer.step()
 
             batch_size = images.size(0)
-            total_loss += loss.item() * batch_size
+            total_ce_loss += ce_loss.item() * batch_size
             total_samples += batch_size
 
-    avg_loss = total_loss / max(total_samples, 1)
+    avg_loss = total_ce_loss / max(total_samples, 1)
     return model, avg_loss
 
 
@@ -328,13 +334,13 @@ def evaluate_model(
         min_macro_f1 = float(min(client_f1s))
         macro_f1_gap = float(max_macro_f1 - min_macro_f1)
     else:
+        # 클라이언트별 테스트 로더가 없으면 클라이언트 간 공정성 지표를 정의할 수 없으므로 NaN으로 기록
         avg_loss, y_prob, y_pred, y_true = _collect_predictions(
             model, dataloader, device, criterion, desc="Evaluating Global"
         )
-        per_class_f1 = f1_score(y_true, y_pred, average=None, zero_division=0)
-        max_macro_f1 = float(np.max(per_class_f1))
-        min_macro_f1 = float(np.min(per_class_f1))
-        macro_f1_gap = float(max_macro_f1 - min_macro_f1)
+        max_macro_f1 = float("nan")
+        min_macro_f1 = float("nan")
+        macro_f1_gap = float("nan")
 
     bal_acc = float(balanced_accuracy_score(y_true, y_pred))
     macro_f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0))

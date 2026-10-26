@@ -1,3 +1,4 @@
+import inspect
 import random
 import numpy as np
 import torch
@@ -78,9 +79,10 @@ def compute_class_weights(
     weights = total_samples / (num_classes * safe_counts)
     weights = np.where(counts > 0, weights, 0.0)
 
-    # 가중치 평균이 1이 되도록 정규화
-    if weights.sum() > 0:
-        weights = weights / weights.mean()
+    # 존재하는 클래스(counts > 0)들의 가중치 평균이 1이 되도록 정규화 (결측 클래스가 있는 병원 간 손실 스케일 통일)
+    present_mask = counts > 0
+    if np.any(present_mask):
+        weights = weights / weights[present_mask].mean()
 
     return torch.tensor(weights, dtype=torch.float32, device=device)
 
@@ -115,7 +117,9 @@ def get_dataloaders(
     if mode not in ("top3", "merge6"):
         raise ValueError(f"지원하지 않는 mode입니다: {mode}. 'top3' 또는 'merge6'을 사용하세요.")
 
-    flamby_kwargs = {"debug": debug}
+    flamby_kwargs = {}
+    if "debug" in inspect.signature(FedIsic2019.__init__).parameters:
+        flamby_kwargs["debug"] = debug
     if data_path is not None:
         flamby_kwargs["data_path"] = data_path
 
