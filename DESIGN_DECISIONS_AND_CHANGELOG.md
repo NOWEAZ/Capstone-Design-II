@@ -107,3 +107,29 @@
    - 연합학습 원 논문(McMahan et al., Li et al.)의 표준 평가 방식에 따라 **"동일한 임상 목표 정확도(Target Balanced Acc)에 도달하기까지 소모된 누적 통신량(MB)"** 을 비교함.
    - 이를 통해 FedProx가 Client Drift로 인한 수렴 지연을 줄여 **목표 성능 달성에 필요한 병원-서버 간 네트워크 통신 비용을 얼마나 절감하는지** 정량적으로 제시할 수 있음.
 
+---
+
+## 7. 최종 코드 감사(Code Audit)를 통한 최적화 및 잠재적 결함 수정 (4건)
+
+전체 파이프라인의 실행 속도, 실험 정합성, 런타임 안정성을 최종 점검하여 다음 4가지 항목을 개선함.
+
+### 7.1 `evaluate_model` 테스트셋 중복 추론(Double Inference) 제거 — 평가 속도 2배 향상
+- **기존 문제**: `federated_core.py`의 `evaluate_model`에서 Global Test 로더(`test_loader`) 전체를 먼저 1회 추론한 뒤, 클라이언트 간 공정성 지표(`macro_f1_gap`)를 구하기 위해 `client_test_loaders`를 처음부터 다시 추론하여 동일한 테스트 이미지를 매 라운드 2번씩 GPU에 통과시키는 비효율이 존재했음.
+- **수정 내역**: `client_test_loaders`를 단 1회씩만 순회하며 각 클라이언트의 `Macro-F1`을 계산하고, 동시에 수집된 예측 확률(`y_prob`), 예측값(`y_pred`), 정답(`y_true`), 가중 손실을 하나로 결합(`np.concatenate`)하여 Global 평가지표(`balanced_acc`, `macro_f1`, `ece`, `loss`)를 한 번에 산출하도록 통합함.
+- **근거**: 수치적 결과는 100% 동일하게 유지하면서 매 라운드 평가(Evaluation)에 소요되는 GPU 추론 시간을 정확히 절반(50%)으로 단축함.
+
+### 7.2 `mode='top3'` 시나리오의 Global Test 데이터셋 범위 정합성 확보
+- **기존 문제**: `data_utils.py`에서 `test_dataset = FedIsic2019(train=False, pooled=True)`를 고정 사용하여, 센터 0, 1, 2만 참여하는 `mode='top3'` 실험에서도 학습에 전혀 참여하지 않은 센터 3, 4, 5의 테스트 샘플이 Global 평가에 혼입되었음.
+- **수정 내역**: `test_dataset = ConcatDataset(client_test_datasets)`로 변경함.
+- **근거**: `top3` 모드에서는 참여 병원(센터 0, 1, 2)의 통합 테스트셋으로, `merge6` 모드에서는 전체 6개 병원(센터 0~5)의 통합 테스트셋으로 평가 도메인을 학습 도메인과 엄밀하게 일치시킴.
+
+### 7.3 `BatchNorm2d` 유지에 따른 마지막 미니배치 크기 1(`batch_size == 1`) 런타임 에러 방어
+- **기존 문제**: `EfficientNet-B0`에서 `BatchNorm2d`를 유지할 경우, 특정 클라이언트의 학습 샘플 수 $N$이 배치 크기로 나누어떨어지지 않고 마지막 배치에 샘플이 딱 1장(`N % batch_size == 1`)만 남으면 `BatchNorm2d`가 채널 분산을 계산할 수 없어 `ValueError` 크래시가 발생함.
+- **수정 내역**: `federated_core.py`의 `train_one_client` 학습 루프 초입에 `if images.size(0) == 1: continue` 방어 로직을 추가함.
+- **근거**: 전체 배치에 대해 `drop_last=True`를 켜서 매 에폭마다 최대 `batch_size - 1`개의 데이터를 버리는 손실을 피하면서도, `N % batch_size == 1`인 예외적인 상황에서만 단일 샘플 배치를 건너뛰어 런타임 중단 위험을 원천 차단함.
+
+### 7.4 `Centralized` 학습 시 `weight_divergence` 계산 정리 및 메모리 절약
+- **기존 문제**: `main.py`에서 `method == 'centralized'`일 때 매 라운드 이전 모델(`prev_model`)을 `deepcopy`하여 현재 모델과의 L2 거리를 `weight_divergence`에 기록했음.
+- **수정 내역**: `Centralized` 분기에서 불필요한 `copy.deepcopy(global_model)`를 제거하고 `avg_divergence = 0.0`으로 고정함.
+- **근거**: 연합학습의 `weight_divergence`는 **"동일 라운드 내 글로벌 모델과 각 로컬 모델 간의 파라미터 괴리(Client Drift)"** 를 측정하는 지표임. 반면 `Centralized`의 이전 에폭 대비 변화량은 물리적 의미가 전혀 다른 '에폭 간 이동 거리'이므로, 같은 그래프에 플롯할 때 발생하는 해석상의 왜곡을 방지하고 불필요한 GPU 메모리 복사를 제거함.
+
