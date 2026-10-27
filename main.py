@@ -1,6 +1,7 @@
 import argparse
 import copy
 import csv
+import json
 import os
 import random
 import numpy as np
@@ -19,26 +20,44 @@ from federated_core import (
 )
 
 
+# 클라이언트(병원) 수. 클라이언트별 F1 열 개수를 결정한다 (top3/merge6 모두 3개)
+NUM_CLIENTS = 3
+
+# 매 라운드 CSV에는 검증(validation) 지표만 기록한다. test는 학습 종료 후 1회만 평가한다 (--final_test).
 CSV_FIELDS = [
     "round",
     "method",
     "mode",
     "mu",
     "seed",
+    "eval_split",
     "train_loss",
-    "test_loss",
+    "val_loss",
     "balanced_acc",
     "macro_f1",
+    "macro_f1_fixed8",
     "ece",
     "max_macro_f1",
     "min_macro_f1",
     "macro_f1_gap",
+    *[f"macro_f1_client{k}" for k in range(NUM_CLIENTS)],
+    *[f"macro_f1_fixed8_client{k}" for k in range(NUM_CLIENTS)],
     "weight_divergence",
     "cumulative_comm_mb",
 ]
 
 # resume 시 기존 체크포인트와 반드시 일치해야 하는 실험 설정 키
-RESUME_CONFIG_KEYS = ["method", "mode", "mu", "seed", "lr", "local_epochs", "batch_size"]
+RESUME_CONFIG_KEYS = [
+    "method",
+    "mode",
+    "mu",
+    "seed",
+    "lr",
+    "local_epochs",
+    "batch_size",
+    "val_fraction",
+    "split_seed",
+]
 
 
 def set_seed(seed: int):
@@ -131,6 +150,24 @@ def parse_args():
         action="store_true",
         help="save_dir에 동일 실험의 last 체크포인트가 있으면 마지막 완료 라운드 다음부터 이어서 학습",
     )
+    parser.add_argument(
+        "--val_fraction",
+        type=float,
+        default=0.1,
+        help="센터별 train에서 층화로 떼어 낼 검증(validation) 비율. 매 라운드 평가와 모델/mu 선택에 사용",
+    )
+    parser.add_argument(
+        "--split_seed",
+        type=int,
+        default=0,
+        help="train/val 분할 시드. 실험 시드(--seed)와 무관하게 고정해 모든 실행이 같은 검증셋을 쓰도록 함",
+    )
+    parser.add_argument(
+        "--final_test",
+        action="store_true",
+        help="학습 종료 후 마지막 라운드 모델(과 best-val 모델)을 FLamby test로 딱 1회 평가해 "
+             "*_final_test.json / *_final_test_preds.npz로 저장 (이미 결과 파일이 있으면 다시 열지 않음)",
+    )
     return parser.parse_args()
 
 
@@ -190,6 +227,92 @@ def _truncate_csv(csv_path: str, last_round: int):
             writer.writerow({k: row.get(k, "") for k in CSV_FIELDS})
 
 
+def _atomic_write_text(path: str, text: str):
+    tmp_path = path + ".tmp"
+    with open(tmp_path, mode="w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp_path, path)
+
+
+def _run_final_test(
+    args,
+    run_config: dict,
+    exp_tag: str,
+    global_model,
+    best_model_path: str,
+    test_loader,
+    criterion,
+    device,
+):
+    """
+    학습이 모두 끝난 뒤 FLamby test를 딱 1회 평가합니다.
+
+    - 마지막 라운드 모델(주 결과)과 best-val 모델(참고)을 평가합니다. 둘 다 test가 아니라 val로 정해진 모델입니다.
+    - 결과 파일이 이미 있으면 test를 다시 열지 않고 건너뜁니다 (여러 번 보고 고르는 것을 방지).
+    - 마지막 모델의 예측(y_true, y_pred, y_prob, client_idx)을 .npz로 저장해 bootstrap 신뢰구간 등을
+      학습 재실행 없이 계산할 수 있게 합니다.
+    """
+    json_path = os.path.join(args.save_dir, f"{exp_tag}_seed{args.seed}_final_test.json")
+    npz_path = os.path.join(args.save_dir, f"{exp_tag}_seed{args.seed}_final_test_preds.npz")
+    if os.path.exists(json_path):
+        print(f"[Final Test] 이미 결과가 있어 test를 다시 평가하지 않습니다: {json_path}")
+        return
+
+    def _strip(metrics: dict) -> dict:
+        return {k: v for k, v in metrics.items() if k != "predictions"}
+
+    print("[Final Test] 마지막 라운드 모델을 test 셋으로 평가합니다 (1회).")
+    final_metrics = evaluate_model(
+        model=global_model,
+        dataloader=test_loader,
+        device=device,
+        criterion=criterion,
+        return_predictions=True,
+    )
+    preds = final_metrics["predictions"]
+    np.savez_compressed(
+        npz_path,
+        y_true=preds["y_true"],
+        y_pred=preds["y_pred"],
+        y_prob=preds["y_prob"],
+        client_idx=preds["client_idx"],
+    )
+
+    result = {
+        "eval_split": "test",
+        "config": run_config,
+        "final_round": args.rounds,
+        "final": _strip(final_metrics),
+        "best_val": None,
+    }
+
+    if os.path.exists(best_model_path):
+        try:
+            best_ckpt = torch.load(best_model_path, map_location="cpu", weights_only=False)
+        except TypeError:
+            best_ckpt = torch.load(best_model_path, map_location="cpu")
+        best_model = copy.deepcopy(global_model)
+        best_model.load_state_dict(best_ckpt["model_state_dict"])
+        best_metrics = evaluate_model(
+            model=best_model,
+            dataloader=test_loader,
+            device=device,
+            criterion=criterion,
+        )
+        result["best_val"] = {
+            "round": best_ckpt.get("round"),
+            "val_balanced_acc": best_ckpt.get("balanced_acc"),
+            **_strip(best_metrics),
+        }
+
+    _atomic_write_text(json_path, json.dumps(result, indent=2, ensure_ascii=False))
+    print(
+        f"[Final Test] Bal Acc: {final_metrics['balanced_acc']:.4f} | "
+        f"Macro F1: {final_metrics['macro_f1']:.4f} | ECE: {final_metrics['ece']:.4f} | "
+        f"Gap: {final_metrics['macro_f1_gap']:.4f} → {json_path}"
+    )
+
+
 def main():
     args = parse_args()
     set_seed(args.seed)
@@ -205,18 +328,28 @@ def main():
     )
 
     # 1. DataLoader 준비
-    client_loaders, centralized_loader, test_loader = get_dataloaders(
+    client_loaders, centralized_loader, val_loader, test_loader = get_dataloaders(
         mode=args.mode,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         data_path=args.data_path,
         seed=args.seed,
+        val_fraction=args.val_fraction,
+        split_seed=args.split_seed,
     )
 
     num_clients = len(client_loaders)
+    if num_clients != NUM_CLIENTS:
+        raise ValueError(
+            f"클라이언트 수({num_clients})가 CSV 열 정의(NUM_CLIENTS={NUM_CLIENTS})와 다릅니다."
+        )
     client_sample_counts = [len(loader.dataset) for loader in client_loaders]
     print(f"[Info] Number of clients: {num_clients} | Client samples: {client_sample_counts}")
-    print(f"[Info] Centralized train samples: {len(centralized_loader.dataset)} | Test samples: {len(test_loader.dataset)}")
+    print(
+        f"[Info] Centralized train samples: {len(centralized_loader.dataset)} | "
+        f"Val samples: {len(val_loader.dataset)} | Test samples: {len(test_loader.dataset)} "
+        f"(val_fraction={args.val_fraction}, split_seed={args.split_seed})"
+    )
 
     # 2. 클래스 불균형 해소를 위한 역빈도 가중치 계산
     if args.method == "centralized":
@@ -273,6 +406,8 @@ def main():
         "lr": args.lr,
         "local_epochs": args.local_epochs,
         "batch_size": args.batch_size,
+        "val_fraction": args.val_fraction,
+        "split_seed": args.split_seed,
     }
 
     start_round = 1
@@ -304,11 +439,11 @@ def main():
         _truncate_csv(csv_path, ckpt["round"])
         print(
             f"[Resume] {last_ckpt_path} 로드 완료 → Round {start_round}부터 재개 "
-            f"(현재 Best Balanced Acc: {best_balanced_acc:.4f})"
+            f"(현재 Best Val Balanced Acc: {best_balanced_acc:.4f})"
         )
         if start_round > args.rounds:
-            print(f"[Resume] 이미 {ckpt['round']} 라운드까지 완료된 실험입니다. 종료합니다.")
-            return
+            # 학습은 이미 끝났으므로 루프는 건너뛰고, --final_test가 지정됐다면 아래에서 test 평가만 수행
+            print(f"[Resume] 이미 {ckpt['round']} 라운드까지 완료된 실험입니다. 학습을 건너뜁니다.")
     else:
         if args.resume:
             print("[Resume] 기존 체크포인트가 없어 처음부터 학습합니다.")
@@ -370,25 +505,28 @@ def main():
                 client_sample_counts=client_sample_counts,
             )
 
-        # 글로벌 테스트셋 및 클라이언트별 테스트셋 평가
+        # 글로벌 검증셋 및 클라이언트별 검증셋 평가 (test는 학습 종료 후 --final_test로 1회만 평가)
         eval_metrics = evaluate_model(
             model=global_model,
-            dataloader=test_loader,
+            dataloader=val_loader,
             device=device,
             criterion=criterion,
         )
-        test_loss = eval_metrics["loss"]
+        val_loss = eval_metrics["loss"]
         balanced_acc = eval_metrics["balanced_acc"]
         macro_f1 = eval_metrics["macro_f1"]
+        macro_f1_fixed8 = eval_metrics["macro_f1_fixed8"]
         ece = eval_metrics["ece"]
         max_macro_f1 = eval_metrics["max_macro_f1"]
         min_macro_f1 = eval_metrics["min_macro_f1"]
         macro_f1_gap = eval_metrics["macro_f1_gap"]
+        client_f1 = eval_metrics["client_macro_f1"]
+        client_f1_fixed8 = eval_metrics["client_macro_f1_fixed8"]
         cumulative_comm_mb = r * round_comm_mb
 
         print(
             f"[Round {r:03d}/{args.rounds:03d}] "
-            f"Train CE: {train_loss:.4f} | Test Loss: {test_loss:.4f} | "
+            f"Train CE: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
             f"Bal Acc: {balanced_acc:.4f} | Macro F1: {macro_f1:.4f} "
             f"(Gap: {macro_f1_gap:.4f} [{min_macro_f1:.4f}~{max_macro_f1:.4f}]) | "
             f"ECE: {ece:.4f} | Weight Div: {avg_divergence:.4f} | "
@@ -402,10 +540,12 @@ def main():
             "mode": args.mode,
             "mu": effective_mu,
             "seed": args.seed,
+            "eval_split": "val",
             "train_loss": round(train_loss, 6),
-            "test_loss": round(test_loss, 6),
+            "val_loss": round(val_loss, 6),
             "balanced_acc": round(balanced_acc, 6),
             "macro_f1": round(macro_f1, 6),
+            "macro_f1_fixed8": round(macro_f1_fixed8, 6),
             "ece": round(ece, 6),
             "max_macro_f1": round(max_macro_f1, 6),
             "min_macro_f1": round(min_macro_f1, 6),
@@ -413,6 +553,9 @@ def main():
             "weight_divergence": round(avg_divergence, 6),
             "cumulative_comm_mb": round(cumulative_comm_mb, 2),
         }
+        for k in range(NUM_CLIENTS):
+            row_data[f"macro_f1_client{k}"] = round(client_f1[k], 6)
+            row_data[f"macro_f1_fixed8_client{k}"] = round(client_f1_fixed8[k], 6)
         with open(csv_path, mode="a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
             writer.writerow(row_data)
@@ -437,7 +580,7 @@ def main():
                 best_model_path,
             )
             print(
-                f"  -> [*] Best Balanced Acc 갱신 ({best_balanced_acc:.4f})! 가중치 저장 완료: {best_model_path}"
+                f"  -> [*] Best Val Balanced Acc 갱신 ({best_balanced_acc:.4f})! 가중치 저장 완료: {best_model_path}"
             )
 
         # 매 라운드 종료 시 resume용 last 체크포인트 저장 (모델 + 옵티마이저 + 난수 상태)
@@ -456,8 +599,20 @@ def main():
         )
 
     print(
-        f"[Done] 학습 완료. 최고 Balanced Acc: {best_balanced_acc:.4f} | 결과 파일: {csv_path}"
+        f"[Done] 학습 완료. 최고 Val Balanced Acc: {best_balanced_acc:.4f} | 결과 파일: {csv_path}"
     )
+
+    if args.final_test:
+        _run_final_test(
+            args=args,
+            run_config=run_config,
+            exp_tag=exp_tag,
+            global_model=global_model,
+            best_model_path=best_model_path,
+            test_loader=test_loader,
+            criterion=criterion,
+            device=device,
+        )
 
 
 if __name__ == "__main__":

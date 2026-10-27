@@ -268,29 +268,54 @@ def _collect_predictions(
     return avg_loss, y_prob, y_pred, y_true
 
 
+def _macro_f1(y_true, y_pred, labels) -> float:
+    """labels에 지정한 클래스만 평균한 macro-F1 (정답에 없는 클래스를 지정하면 F1=0으로 들어감)."""
+    return float(
+        f1_score(y_true, y_pred, labels=labels, average="macro", zero_division=0)
+    )
+
+
 @torch.no_grad()
 def evaluate_model(
     model: nn.Module,
     dataloader,
     device: torch.device | str,
     criterion: nn.Module | None = None,
-    client_test_loaders: list | None = None,
+    client_eval_loaders: list | None = None,
     n_bins: int = 15,
-) -> dict[str, float]:
+    num_classes: int = 8,
+    return_predictions: bool = False,
+) -> dict:
     """
-    글로벌 테스트 DataLoader에서 모델을 평가하여
+    DataLoader(검증 또는 테스트)에서 모델을 평가하여
     Balanced Accuracy, Macro F1-Score, ECE(Expected Calibration Error),
     그리고 클라이언트별 최고-최저 Macro-F1 격차(Fairness 지표)를 계산합니다.
+
+    Macro-F1은 두 가지 방식으로 계산합니다.
+    - `macro_f1` / 클라이언트별 `client_macro_f1`: 해당 평가셋의 정답에 실제로 존재하는 클래스만 평균 (주 지표).
+      병원마다 보유 클래스가 다르므로 "없는 클래스 때문에 F1이 0으로 들어가는" 왜곡을 피합니다.
+      max/min/gap도 이 값으로 계산합니다.
+    - `macro_f1_fixed8` / `client_macro_f1_fixed8`: 클래스 0~(num_classes-1) 전부 평균 (보조 지표).
+
+    Args:
+        client_eval_loaders: 클라이언트별 평가 로더. None이면 dataloader의 `client_eval_loaders`
+            (없으면 `client_test_loaders`) 속성을 사용
+        return_predictions: True면 결과에 `predictions`(y_true, y_pred, y_prob, client_idx)를 포함
+            (최종 test 예측 저장 및 bootstrap 신뢰구간 계산용)
 
     Returns:
         dict: {
             "loss": float,
             "balanced_acc": float,
             "macro_f1": float,
+            "macro_f1_fixed8": float,
             "ece": float,
             "max_macro_f1": float,
             "min_macro_f1": float,
             "macro_f1_gap": float,
+            "client_macro_f1": list[float],
+            "client_macro_f1_fixed8": list[float],
+            ("predictions": dict)
         }
     """
     model.to(device)
@@ -299,24 +324,31 @@ def evaluate_model(
     if criterion is None:
         criterion = nn.CrossEntropyLoss()
 
-    if client_test_loaders is None and hasattr(dataloader, "client_test_loaders"):
-        client_test_loaders = dataloader.client_test_loaders
+    if client_eval_loaders is None:
+        client_eval_loaders = getattr(dataloader, "client_eval_loaders", None) or getattr(
+            dataloader, "client_test_loaders", None
+        )
 
-    # 클라이언트별 테스트 로더가 존재하면 단 1번의 순회로 클라이언트별 지표와 Global 통합 지표를 동시에 계산 (중복 추론 방지)
-    if client_test_loaders:
-        client_f1s = []
+    all_labels = list(range(num_classes))
+    client_f1s: list[float] = []
+    client_f1s_fixed8: list[float] = []
+    client_idx = None
+
+    # 클라이언트별 로더가 존재하면 단 1번의 순회로 클라이언트별 지표와 Global 통합 지표를 동시에 계산 (중복 추론 방지)
+    if client_eval_loaders:
         global_probs = []
         global_preds = []
         global_targets = []
+        global_client_idx = []
         total_loss_sum = 0.0
         total_sample_cnt = 0
 
-        for idx, c_loader in enumerate(client_test_loaders):
+        for idx, c_loader in enumerate(client_eval_loaders):
             c_loss, c_prob, c_pred, c_true = _collect_predictions(
                 model, c_loader, device, criterion, desc=f"Eval Client {idx}"
             )
-            c_f1 = float(f1_score(c_true, c_pred, average="macro", zero_division=0))
-            client_f1s.append(c_f1)
+            client_f1s.append(_macro_f1(c_true, c_pred, np.unique(c_true)))
+            client_f1s_fixed8.append(_macro_f1(c_true, c_pred, all_labels))
 
             n_c = len(c_true)
             total_loss_sum += c_loss * n_c
@@ -324,17 +356,19 @@ def evaluate_model(
             global_probs.append(c_prob)
             global_preds.append(c_pred)
             global_targets.append(c_true)
+            global_client_idx.append(np.full(n_c, idx, dtype=np.int64))
 
         y_prob = np.concatenate(global_probs, axis=0)
         y_pred = np.concatenate(global_preds, axis=0)
         y_true = np.concatenate(global_targets, axis=0)
+        client_idx = np.concatenate(global_client_idx, axis=0)
         avg_loss = total_loss_sum / max(total_sample_cnt, 1)
 
         max_macro_f1 = float(max(client_f1s))
         min_macro_f1 = float(min(client_f1s))
         macro_f1_gap = float(max_macro_f1 - min_macro_f1)
     else:
-        # 클라이언트별 테스트 로더가 없으면 클라이언트 간 공정성 지표를 정의할 수 없으므로 NaN으로 기록
+        # 클라이언트별 로더가 없으면 클라이언트 간 공정성 지표를 정의할 수 없으므로 NaN으로 기록
         avg_loss, y_prob, y_pred, y_true = _collect_predictions(
             model, dataloader, device, criterion, desc="Evaluating Global"
         )
@@ -343,16 +377,27 @@ def evaluate_model(
         macro_f1_gap = float("nan")
 
     bal_acc = float(balanced_accuracy_score(y_true, y_pred))
-    macro_f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+    macro_f1 = _macro_f1(y_true, y_pred, np.unique(y_true))
+    macro_f1_fixed8 = _macro_f1(y_true, y_pred, all_labels)
     ece = compute_ece(y_prob, y_true, n_bins=n_bins)
 
-    return {
+    result = {
         "loss": avg_loss,
         "balanced_acc": bal_acc,
         "macro_f1": macro_f1,
+        "macro_f1_fixed8": macro_f1_fixed8,
         "ece": ece,
         "max_macro_f1": max_macro_f1,
         "min_macro_f1": min_macro_f1,
         "macro_f1_gap": macro_f1_gap,
+        "client_macro_f1": client_f1s,
+        "client_macro_f1_fixed8": client_f1s_fixed8,
     }
-
+    if return_predictions:
+        result["predictions"] = {
+            "y_true": y_true,
+            "y_pred": y_pred,
+            "y_prob": y_prob,
+            "client_idx": client_idx if client_idx is not None else np.zeros(len(y_true), dtype=np.int64),
+        }
+    return result
