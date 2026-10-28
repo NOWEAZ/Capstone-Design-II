@@ -1,0 +1,7 @@
+﻿method,metric,client0 (n=2483),client1 (n=791),client2 (n=672),mean gap
+Centralized,present-class macro-F1,0.7627 ± 0.0067,0.7647 ± 0.0460,0.6744 ± 0.0185,0.1039
+Centralized,fixed-8 macro-F1,0.7627 ± 0.0067,0.4779 ± 0.0288,0.5901 ± 0.0162,0.2847
+FedAvg,present-class macro-F1,0.7666 ± 0.0076,0.5967 ± 0.0161,0.6048 ± 0.0168,0.1719
+FedAvg,fixed-8 macro-F1,0.7666 ± 0.0076,0.3729 ± 0.0101,0.5292 ± 0.0147,0.3937
+FedProx (μ=0.001),present-class macro-F1,0.7639 ± 0.0030,0.5972 ± 0.0142,0.6024 ± 0.0237,0.1691
+FedProx (μ=0.001),fixed-8 macro-F1,0.7639 ± 0.0030,0.3733 ± 0.0089,0.5271 ± 0.0208,0.3906

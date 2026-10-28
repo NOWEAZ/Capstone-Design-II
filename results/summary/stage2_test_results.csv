@@ -1,0 +1,10 @@
+method,seed,test_balanced_acc,test_macro_f1,test_ece,test_f1_gap,source
+centralized,42,0.8158,0.7724,0.0512,0.1018,Colab
+fedavg,42,0.7862,0.7390,0.0643,0.1784,Kaggle rerun (files saved; matches earlier log)
+fedprox_mu0.001,42,0.7843,0.7341,0.0641,0.1716,Kaggle rerun (files saved; matches earlier log)
+centralized,100,0.8201,0.7626,0.0520,0.0980,Kaggle rerun (files saved; matches earlier log)
+fedavg,100,0.7786,0.7212,0.0661,0.1834,Kaggle rerun (files saved; matches earlier log)
+fedprox_mu0.001,100,0.7780,0.7179,0.0651,0.1796,Kaggle rerun (files saved; matches earlier log)
+centralized,2026,0.7983,0.7736,0.0404,0.1120,Kaggle rerun (files saved; matches earlier log)
+fedavg,2026,0.7638,0.7347,0.0735,0.1538,Kaggle rerun (files saved; matches earlier log)
+fedprox_mu0.001,2026,0.7680,0.7398,0.0722,0.1560,Kaggle rerun (files saved; matches earlier log)
