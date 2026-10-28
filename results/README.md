@@ -23,10 +23,16 @@ FLamby의 Fed-ISIC2019(top3 모드: 클라이언트 3개, 8개 클래스)에서 
 | `runs/stage2/<run>_metrics.csv` | Stage 2 run별 라운드별 지표 |
 | `runs/stage2/<run>_final_test.json` | 마지막 라운드 모델(`final`)과 best-val 체크포인트(`best_val`)의 test 결과 |
 | `runs/stage2/<run>_final_test_preds.npz` | test 예측(`y_true`, `y_pred`, `y_prob`, `client_idx`). 이미지는 포함하지 않음 |
+| `summary/flamby_official_isic2019_summary.csv` | FLamby 공식 벤치마크(6클라이언트, 5시드) balanced accuracy 집계. 비교용 참고값 |
 | `graphs/` | 학습 곡선, 혼동행렬, 통신량 그림(PNG)과 표(CSV). `graphs/data/`는 Stage 1 그림에 쓴 부분집합 CSV |
 
 run 이름은 `<방법>_top3_seed<시드>`입니다(예: `fedprox_mu0.001_top3_seed42`).
 클래스 순서는 MEL, NV, BCC, AK, BKL, DF, VASC, SCC로 가정했습니다(FLamby 순서; NV가 test에서 최다라는 점과 일치).
+
+## FLamby 공식 결과(참고용)
+`summary/flamby_official_isic2019_summary.csv`는 FLamby 저장소의 `flamby/results/results_benchmark_fed_isic2019/isic_seed42.csv`~`isic_seed46.csv`(https://github.com/owkin/FLamby)를 읽어 방법별로 집계한 값입니다.
+시드 5개의 평균 ± 표본 표준편차이고, `Pooled Test`는 6개 센터 전체 test, `mean_c012`는 client_test_0~2의 평균입니다(원본 CSV는 포함하지 않았고, 논문 그림의 값과 같은지는 확인하지 않았습니다).
+우리 실험(클라이언트 3개, 다른 학습 설정, 3개 센터 test 합산)과는 조건이 달라 직접 비교하면 안 됩니다.
 
 ## 포함하지 않은 것
 - 모델 체크포인트(`.pt`): 용량 때문에 저장소에 넣지 않았고(`.gitignore`의 `*.pt`), 팀 Drive의 `CDII_results` 폴더에 있습니다.
