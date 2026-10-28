@@ -35,6 +35,7 @@ run 이름은 `<방법>_top3_seed<시드>`입니다(예: `fedprox_mu0.001_top3_s
 논문 결과 그래프(Fed-ISIC2019 패널)의 막대에서 눈금으로 읽은 근사값(±0.02)은 Pooled 약 0.71, FedAvg 약 0.54, FedProx 약 0.545, SCAFFOLD 약 0.535, FedAdam 약 0.585이고, 이는 CSV의 `mean_c0_5`(6개 클라이언트 test Bal Acc의 평균: 0.708, 0.539, 0.544, 0.531, 0.584)와 눈금 읽기 오차 안에서 일치합니다. 반면 `Pooled Test`(센터를 합친 test, Pooled Training 0.762)는 그래프와 다르므로 논문 그래프는 클라이언트별 평균 집계로 보입니다.
 우리 값은 같은 기준으로 `graphs/10_per_client_balanced_acc.csv`(저장한 예측에서 클라이언트별 Bal Acc 계산)에 있고, 클라이언트 3개 평균은 Centralized 0.767, FedAvg 0.707, FedProx 0.707입니다.
 우리 실험(클라이언트 3개, 다른 학습 설정, 3개 센터 test)과는 조건이 달라 직접 비교하면 안 됩니다.
+FLamby 저장소의 Fed-ISIC2019 기본 상수(`common.py`)는 배치 64, 학습률 5e-4, Adam입니다. 이 값이 논문 벤치마크 실험에서 실제로 쓰였는지는 확인하지 못했습니다. 다른 논문(arXiv 2309.16825)은 AdamW, 배치 64, FedAvg 최적 학습률 1e-3으로 보고합니다. 우리는 배치 32, 학습률 1e-4, Adam, 클라이언트 3개입니다.
 
 ## 포함하지 않은 것
 - 모델 체크포인트(`.pt`): 용량 때문에 저장소에 넣지 않았고(`.gitignore`의 `*.pt`), 팀 Drive의 `CDII_results` 폴더에 있습니다.
